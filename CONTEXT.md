@@ -43,6 +43,25 @@ Stop when the task's declared output and verification contract are satisfied.
 - Fail if any root path, neighboring bundle path, or other out-of-scope path appears.
 - Confirm each required `SKILL.md` remains present.
 
+## Task: bug-fix
+### Context
+- Reference: `README.md`, `AGENTS.md`, `.governance/security.md`, `.governance/testing.md`
+- Working: only the explicitly authorized defect and directly affected verification files
+- Scope: paths authorized by the task or approved plan; no adjacent cleanup
+### Process
+- Preserve a reproducible failing case and relevant environment evidence before the first repair mutation.
+- Separate the observed failure from the suspected cause and test a falsifiable cause hypothesis.
+- Establish a meaningful failing oracle before repairing reproducible faulty behavior.
+- Make only the minimum repair supported by the evidence.
+- Require new evidence before another repair mutation; stop when further mutation would be speculative or outside authority.
+### Outputs
+- Produce the minimum repair and the evidence required to verify the defect transition.
+### Verification
+- Require the original targeted oracle to fail on the bound faulty baseline and pass on the repaired candidate.
+- Run the affected regression verification required by `.governance/testing.md`.
+- Validate the complete tracked-plus-untracked change set against authorized scope.
+- Stop and report `BLOCKED` if required verification cannot be performed or valid verification would need to be weakened.
+
 ## Task: governance-change
 ### Context
 - Reference: `README.md`, `CLAUDE.md`, `AGENTS.md`, `CONTEXT.md`, `.governance/`
