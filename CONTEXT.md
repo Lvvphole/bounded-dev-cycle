@@ -28,14 +28,19 @@ Stop when the task's declared output and verification contract are satisfied.
 - Scope: one supplied skill bundle at a time
 ### Process
 - Require an explicit authoritative source for the replacement bundle.
+- Require `git status --porcelain` to be empty before the first mutation; otherwise stop.
+- Record the immutable pre-task commit SHA as `BASE_SHA` before the first mutation; do not recompute it during the task.
 - Preserve bundle identity and do not opportunistically edit neighboring skills.
 - Do not add root governance files inside a supplied skill bundle.
 - Stop if provenance, approval, or required external dependencies cannot be verified.
 ### Outputs
 - Replace only the authorized bundle content and record what source was used.
 ### Verification
-- Run `git diff --check`.
-- Confirm `git diff --name-only -- skills/` contains only authorized paths.
+- Run `git diff --check "$BASE_SHA" --`.
+- Run `git diff --name-only "$BASE_SHA" --` to list all tracked task changes, including committed, staged, and unstaged changes.
+- Run `git ls-files --others --exclude-standard` to list untracked task files.
+- Validate the union of both path lists; every path must be inside the single authorized `skills/<skill-name>/` bundle.
+- Fail if any root path, neighboring bundle path, or other out-of-scope path appears.
 - Confirm each required `SKILL.md` remains present.
 
 ## Task: governance-change
