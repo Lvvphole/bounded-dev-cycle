@@ -1,0 +1,21 @@
+{
+  "name": "bounded-dev-cycle",
+  "interface": {
+    "displayName": "Bounded Dev Cycle"
+  },
+  "plugins": [
+    {
+      "name": "bounded-dev-cycle",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/Lvvphole/bounded-dev-cycle.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

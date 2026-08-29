@@ -1,0 +1,29 @@
+{
+  "name": "bounded-dev-cycle",
+  "version": "1.0.0",
+  "description": "A bounded Scout → Plan → Build development workflow for repository work, with read-only reconnaissance, PLAN_READY handoff, human approval, and tightly scoped verified implementation.",
+  "repository": "https://github.com/Lvvphole/bounded-dev-cycle",
+  "keywords": [
+    "software-development",
+    "scout",
+    "planning",
+    "build",
+    "verification",
+    "bounded-execution"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Bounded Dev Cycle",
+    "shortDescription": "Bounded Scout → Plan → Build workflow",
+    "longDescription": "Run repository development through strict read-only Scout reconnaissance, one PLAN_READY planning pass, human approval of the exact plan identity, and one tightly scoped verified Build execution.",
+    "developerName": "Lvvphole",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Run one bounded Scout → Plan → Build repository cycle. Invoke scout-agent first and keep it read-only. Invoke plan exactly once using the completed Scout handoff. Do not invoke build-agent until the exact PLAN_READY identity has been reviewed and approved by the human. Then invoke build-agent exactly once using only that approved PLAN_READY artifact. Stop on any blocked or failed gate."
+    ]
+  }
+}
