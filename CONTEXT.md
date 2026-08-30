@@ -52,6 +52,8 @@ Stop when the task's declared output and verification contract are satisfied.
 - Preserve a reproducible failing case and relevant environment evidence before the first repair mutation.
 - Separate the observed failure from the suspected cause and test a falsifiable cause hypothesis.
 - Establish a meaningful failing oracle before repairing reproducible faulty behavior.
+- `BUGFIX-REMOVE-FIRST`: Before adding code or configuration, determine whether removing incorrect, redundant, conflicting, or unnecessary implementation restores the contract; prefer removal or simplification when sufficient.
+- `BUGFIX-NO-INVENTED-FILES`: Do not create a new file unless the task or approved plan explicitly authorizes that exact path and purpose; do not invent helper, wrapper, abstraction, configuration, documentation, or test files.
 - Make only the minimum repair supported by the evidence.
 - Require new evidence before another repair mutation; stop when further mutation would be speculative or outside authority.
 ### Outputs
