@@ -68,6 +68,12 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def normalized_text(data: bytes | None) -> str:
+    if data is None:
+        return ""
+    return data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         ["git", "-C", str(root), *args],
@@ -247,8 +253,8 @@ def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
     context_bytes = raw["CONTEXT.md"]
     testing_bytes = raw[".governance/testing.md"]
     script_bytes = raw[".governance/tests/test-bug-fix-contract.py"]
-    context = "" if context_bytes is None else context_bytes.decode("utf-8")
-    testing = "" if testing_bytes is None else testing_bytes.decode("utf-8")
+    context = normalized_text(context_bytes)
+    testing = normalized_text(testing_bytes)
     route = section(context, "## Task: bug-fix", "## Task:")
     contract = section(testing, "### bug-fix", "### ")
     schema_fields = set() if script_bytes is None else output_fields(script_bytes)
