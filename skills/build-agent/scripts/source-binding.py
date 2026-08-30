@@ -124,7 +124,7 @@ def nested_repo_sha256(root: Path) -> str:
                 pending.append(path)
                 continue
             entries.append(worktree_entry(path, relative))
-    entries.sort(key=lambda entry: str(entry['path']).encode('utf-8'))
+    entries.sort(key=lambda entry: os.fsencode(str(entry['path'])))
     return sha256(canonical_json(entries))
 
 

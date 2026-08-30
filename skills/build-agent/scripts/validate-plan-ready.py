@@ -132,6 +132,14 @@ def validate_increment(value: object, index: int, errors: list[str]) -> str | No
             required = {"trials", "accept_if", "candidate_state", "stopping_rule"}
             if not isinstance(protocol, dict) or not required.issubset(protocol):
                 errors.append(f"{prefix}.verifier.protocol is incomplete")
+            else:
+                trials = protocol["trials"]
+                if isinstance(trials, bool) or not isinstance(trials, int) or trials <= 0:
+                    errors.append(f"{prefix}.verifier.protocol.trials must be a positive integer")
+                for field in ("accept_if", "candidate_state", "stopping_rule"):
+                    item = protocol[field]
+                    if not isinstance(item, str) or not item.strip():
+                        errors.append(f"{prefix}.verifier.protocol.{field} must be a non-empty string")
 
     budgets = value.get("budgets")
     budget_fields = ("repair_attempts", "command_timeout_seconds", "increment_timeout_seconds")

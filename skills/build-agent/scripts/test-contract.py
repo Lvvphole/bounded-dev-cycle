@@ -111,6 +111,26 @@ def test_dependency_type_guard() -> None:
     expect_error(manifest, "dependencies must contain only strings")
 
 
+def test_nondeterministic_protocol_values() -> None:
+    """A nondeterministic verifier must declare a usable bounded protocol."""
+    invalid_protocols = (
+        {"trials": 0, "accept_if": "accepted", "candidate_state": "stable", "stopping_rule": "stop"},
+        {"trials": True, "accept_if": "accepted", "candidate_state": "stable", "stopping_rule": "stop"},
+        {"trials": 1, "accept_if": "", "candidate_state": "stable", "stopping_rule": "stop"},
+        {"trials": 1, "accept_if": "accepted", "candidate_state": "", "stopping_rule": "stop"},
+        {"trials": 1, "accept_if": "accepted", "candidate_state": "stable", "stopping_rule": ""},
+    )
+    for protocol in invalid_protocols:
+        manifest = valid_manifest()
+        manifest["increments"][0]["verifier"] = {
+            "reference": "test",
+            "oracle": "detects violation",
+            "class": "DECLARED_NONDETERMINISTIC",
+            "protocol": protocol,
+        }
+        expect_error(manifest, "verifier.protocol")
+
+
 def test_source_binding_field_required() -> None:
     manifest = valid_manifest()
     del manifest["source_binding"]["dirty_submodule_manifest_sha256"]
@@ -298,9 +318,30 @@ def test_source_binding_invalid_utf8_filename() -> None:
             raise AssertionError("distinct invalid-UTF-8 filenames bound identically")
 
 
+def test_source_binding_nested_invalid_utf8_filename() -> None:
+    """Invalid-UTF-8 names inside nested repositories must sort without crashing."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        git(repo, "init", "-q")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test")
+        (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-qm", "base")
+        (repo / "plans").mkdir()
+        (repo / "plans" / "plan.md").write_text("plan\n", encoding="utf-8")
+
+        nested = repo / "vendor" / "dep"
+        nested.mkdir(parents=True)
+        git(nested, "init", "-q")
+        (nested / os.fsdecode(b"bad-\xff.txt")).write_bytes(b"one")
+        source_binding.compute(repo, "plans/plan.md")
+
+
 def main() -> int:
     test_paths_and_publication()
     test_dependency_type_guard()
+    test_nondeterministic_protocol_values()
     test_source_binding_field_required()
     test_exact_heading()
     test_source_binding()
@@ -308,6 +349,7 @@ def main() -> int:
     test_source_binding_nested_repository()
     test_source_binding_dirty_submodule()
     test_source_binding_invalid_utf8_filename()
+    test_source_binding_nested_invalid_utf8_filename()
     print("build-agent contract regressions: PASS")
     return 0
 

@@ -2,9 +2,10 @@
 name: build-agent
 description: Execute a human-approved PLAN_READY artifact as minimal, evaluation-driven repository changes. Use when the user asks to implement, build, or run an approved plan. Validate the plan, repository identity, governance, dependencies, vertical increments, verification, and authority before mutation. Do not use to plan, expand scope, invent requirements, redesign the selected solution, or self-certify release completion.
 metadata:
-  version: "2.3.0"
-  supersedes-package-sha256: "c71704ea11b5664292da6bc62dd008b7ec5e98c613b5f6d8e206aacb842b9510"
+  version: "2.3.1"
+  supersedes-package-sha256: "cf9d063211a02f174cf79189832b55ed5faeb2651cba9a64d1b6de2fe3c3b557"
   supersedes-skill-sha256:
+    - "9d23ab6f1a806e33544cf97e9e2218402a6d7dbb01676a5a49dfff19d5c59eea"
     - "4ac39ba452cd57cf61136584a9b6e348dc5d41908baa73841b947938543b3eb4"
     - "fa05bee2032079668b5e01f4f910df0201c2c7ffe608e69cc88696f8fb528d5b"
     - "ee636654a24428d571c38ef28c653c9561b69f83dc1a2e48f0b96472a8c2bdd5"
