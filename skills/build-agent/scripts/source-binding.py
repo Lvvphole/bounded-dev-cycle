@@ -83,7 +83,10 @@ def sha256(data: bytes) -> str:
 
 
 def canonical_json(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    # ensure_ascii=True: filesystem paths reach here via surrogateescape decoding and
+    # may contain lone surrogates that are not valid UTF-8. \\uXXXX-escaping keeps the
+    # output distinguishable per distinct byte sequence and always ASCII-encodable.
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode('ascii')
 
 
 def diff_bytes(repo: Path, neutral_file: Path, excluded: str, *, staged: bool) -> bytes:
@@ -140,6 +143,53 @@ def worktree_entry(path: Path, relative: str) -> dict[str, str | int]:
     raise ValueError(f'unsupported untracked file type: {relative}')
 
 
+def dirty_submodule_manifest(repo: Path, neutral_file: Path) -> bytes:
+    """Hash the worktree content of every tracked submodule with uncommitted changes.
+
+    A top-level ``git diff`` only ever records a dirty submodule as its checked-out
+    commit with a generic ``-dirty`` suffix, so two different uncommitted submodule
+    states are indistinguishable to ``diff_bytes``. Any submodule with modified
+    tracked content (``m == 'M'``) or untracked content (``u == 'U'``) is hashed here
+    by worktree content, the same way an untracked nested repository is hashed.
+    """
+    raw = git(
+        repo, neutral_file,
+        'status', '--porcelain=v2', '-z',
+        '--ignore-submodules=none', '--untracked-files=no',
+        '--', '.',
+    )
+    records = raw.split(b'\0')
+    entries: list[dict[str, str | int]] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        text = record.decode('utf-8', 'surrogateescape')
+        if text.startswith('2 '):
+            # Renamed/copied entries carry one extra NUL-separated origPath token.
+            index += 1
+        if not (text.startswith('1 ') or text.startswith('2 ')):
+            continue
+        fields = text.split(' ', 8)
+        if len(fields) < 9:
+            continue
+        sub_field, relative = fields[2], fields[8]
+        if len(sub_field) != 4 or sub_field[0] != 'S':
+            continue
+        _commit_flag, tracked_flag, untracked_flag = sub_field[1], sub_field[2], sub_field[3]
+        if tracked_flag != 'M' and untracked_flag != 'U':
+            continue
+        entries.append({
+            'path': relative,
+            'kind': 'dirty-submodule',
+            'sha256': nested_repo_sha256(repo / relative),
+        })
+    entries.sort(key=lambda entry: str(entry['path']).encode('utf-8', 'surrogateescape'))
+    return canonical_json(entries)
+
+
 def untracked_manifest(repo: Path, neutral_file: Path, excluded: str) -> bytes:
     raw = git(repo, neutral_file, 'ls-files', '--others', '--exclude-standard', '-z')
     excluded_bytes = os.fsencode(excluded)
@@ -163,6 +213,7 @@ def compute(repo: Path, excluded_plan_path: str) -> dict[str, str]:
             'staged_diff_sha256': sha256(diff_bytes(root, neutral_file, excluded, staged=True)),
             'unstaged_diff_sha256': sha256(diff_bytes(root, neutral_file, excluded, staged=False)),
             'untracked_manifest_sha256': sha256(untracked_manifest(root, neutral_file, excluded)),
+            'dirty_submodule_manifest_sha256': sha256(dirty_submodule_manifest(root, neutral_file)),
             'excluded_plan_path': excluded,
         }
 

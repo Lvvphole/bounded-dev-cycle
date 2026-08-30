@@ -36,6 +36,7 @@ def valid_manifest() -> dict:
             "staged_diff_sha256": "0" * 64,
             "unstaged_diff_sha256": "0" * 64,
             "untracked_manifest_sha256": "0" * 64,
+            "dirty_submodule_manifest_sha256": "0" * 64,
             "excluded_plan_path": "plans/plan.md",
         },
         "task_list": {
@@ -101,6 +102,19 @@ def test_paths_and_publication() -> None:
     manifest["publication"]["commit_paths"] = ["src/app.py"]
     manifest["publication"]["protected_actions"][-1]["state"] = "AUTHORIZED"
     expect_error(manifest, "merge pull request must be UNAUTHORIZED")
+
+
+def test_dependency_type_guard() -> None:
+    """A non-string dependency must be a structured validator error, never a crash."""
+    manifest = valid_manifest()
+    manifest["increments"][0]["dependencies"] = [{"not": "a string"}]
+    expect_error(manifest, "dependencies must contain only strings")
+
+
+def test_source_binding_field_required() -> None:
+    manifest = valid_manifest()
+    del manifest["source_binding"]["dirty_submodule_manifest_sha256"]
+    expect_error(manifest, "source_binding missing field: dirty_submodule_manifest_sha256")
 
 
 def test_exact_heading() -> None:
@@ -211,12 +225,89 @@ def test_source_binding_nested_repository() -> None:
             raise AssertionError("nested repository history leaked into the binding")
 
 
+def test_source_binding_dirty_submodule() -> None:
+    """Two different uncommitted submodule states must not bind identically."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        inner = root / "inner"
+        outer = root / "outer"
+        inner.mkdir()
+        outer.mkdir()
+        git(inner, "init", "-q")
+        git(inner, "config", "user.email", "test@example.com")
+        git(inner, "config", "user.name", "Test")
+        (inner / "f.txt").write_text("one\n", encoding="utf-8")
+        git(inner, "add", "f.txt")
+        git(inner, "commit", "-qm", "base")
+
+        git(outer, "init", "-q")
+        git(outer, "config", "user.email", "test@example.com")
+        git(outer, "config", "user.name", "Test")
+        git(outer, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner), "sub")
+        git(outer, "commit", "-qm", "add submodule")
+        (outer / "plans").mkdir()
+        (outer / "plans" / "plan.md").write_text("plan\n", encoding="utf-8")
+
+        clean = source_binding.compute(outer, "plans/plan.md")
+
+        (outer / "sub" / "f.txt").write_text("two\n", encoding="utf-8")
+        dirty_a = source_binding.compute(outer, "plans/plan.md")
+        if dirty_a["dirty_submodule_manifest_sha256"] == clean["dirty_submodule_manifest_sha256"]:
+            raise AssertionError("dirty submodule content did not change the binding")
+
+        (outer / "sub" / "f.txt").write_text("three\n", encoding="utf-8")
+        dirty_b = source_binding.compute(outer, "plans/plan.md")
+        if dirty_b["dirty_submodule_manifest_sha256"] == dirty_a["dirty_submodule_manifest_sha256"]:
+            raise AssertionError("two different dirty submodule states bound identically")
+
+        # A committed submodule commit-pointer change is already visible in the
+        # ordinary diff and must not also register as a dirty submodule.
+        git(outer / "sub", "config", "user.email", "test@example.com")
+        git(outer / "sub", "config", "user.name", "Test")
+        git(outer / "sub", "add", "-A")
+        git(outer / "sub", "commit", "-qm", "advance")
+        git(outer, "add", "sub")
+        advanced = source_binding.compute(outer, "plans/plan.md")
+        if advanced["dirty_submodule_manifest_sha256"] != clean["dirty_submodule_manifest_sha256"]:
+            raise AssertionError("a clean, committed submodule advance was misclassified as dirty")
+        if advanced["staged_diff_sha256"] == clean["staged_diff_sha256"]:
+            raise AssertionError("a committed submodule pointer advance did not appear in the staged diff")
+
+
+def test_source_binding_invalid_utf8_filename() -> None:
+    """An untracked file with invalid-UTF-8 bytes in its name must not crash the binding."""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = Path(tmp)
+        git(repo, "init", "-q")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test")
+        (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-qm", "base")
+        (repo / "plans").mkdir()
+        (repo / "plans" / "plan.md").write_text("plan\n", encoding="utf-8")
+
+        (repo / os.fsdecode(b"bad-\xff.txt")).write_bytes(b"one")
+        first = source_binding.compute(repo, "plans/plan.md")
+
+        os.remove(repo / os.fsdecode(b"bad-\xff.txt"))
+        (repo / os.fsdecode(b"bad-\xfe.txt")).write_bytes(b"one")
+        second = source_binding.compute(repo, "plans/plan.md")
+
+        if first["untracked_manifest_sha256"] == second["untracked_manifest_sha256"]:
+            raise AssertionError("distinct invalid-UTF-8 filenames bound identically")
+
+
 def main() -> int:
     test_paths_and_publication()
+    test_dependency_type_guard()
+    test_source_binding_field_required()
     test_exact_heading()
     test_source_binding()
     test_source_binding_config_independence()
     test_source_binding_nested_repository()
+    test_source_binding_dirty_submodule()
+    test_source_binding_invalid_utf8_filename()
     print("build-agent contract regressions: PASS")
     return 0
 

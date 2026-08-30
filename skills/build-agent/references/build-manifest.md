@@ -15,6 +15,7 @@ Use one fenced `json` block.
     "staged_diff_sha256": "sha256",
     "unstaged_diff_sha256": "sha256",
     "untracked_manifest_sha256": "sha256",
+    "dirty_submodule_manifest_sha256": "sha256",
     "excluded_plan_path": "path/to/plan.md"
   },
   "task_list": {

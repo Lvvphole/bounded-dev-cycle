@@ -81,11 +81,11 @@ def validate_binding(value: object, errors: list[str]) -> None:
     if not isinstance(value, dict):
         errors.append("source_binding must be an object")
         return
-    require(value, ("commit", "staged_diff_sha256", "unstaged_diff_sha256", "untracked_manifest_sha256", "excluded_plan_path"), "source_binding", errors)
+    require(value, ("commit", "staged_diff_sha256", "unstaged_diff_sha256", "untracked_manifest_sha256", "dirty_submodule_manifest_sha256", "excluded_plan_path"), "source_binding", errors)
     if not value.get("commit"):
         errors.append("source_binding.commit must be non-empty")
     validate_repo_path(value.get("excluded_plan_path"), "source_binding.excluded_plan_path", errors)
-    for field in ("staged_diff_sha256", "unstaged_diff_sha256", "untracked_manifest_sha256"):
+    for field in ("staged_diff_sha256", "unstaged_diff_sha256", "untracked_manifest_sha256", "dirty_submodule_manifest_sha256"):
         if field in value and not SHA256_RE.fullmatch(str(value[field])):
             errors.append(f"source_binding.{field} must be a lowercase SHA-256")
 
@@ -237,6 +237,9 @@ def validate(manifest: dict) -> list[str]:
         if not isinstance(increment, dict) or not isinstance(increment.get("dependencies"), list):
             continue
         for dependency in increment["dependencies"]:
+            if not isinstance(dependency, str):
+                errors.append(f"increments[{index}].dependencies must contain only strings")
+                continue
             if dependency not in positions:
                 errors.append(f"increments[{index}] has unknown dependency: {dependency}")
             elif positions[dependency] >= index:

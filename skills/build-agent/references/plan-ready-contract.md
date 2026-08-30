@@ -57,10 +57,11 @@ A verification-only increment can close an evidence gap without production chang
 
 Verify the exact source state used by Plan before the first repository action.
 Run `python scripts/source-binding.py --repo <repo> --exclude-plan-path <source_binding.excluded_plan_path>`.
-Compare all five returned fields with the manifest `source_binding` object.
+Compare all six returned fields with the manifest `source_binding` object.
 The bundled script is the only canonical source-state projection for this contract.
 It pins Git configuration and ignores ambient user, global, and system settings, so two sessions on the same worktree return the same binding.
 It records an untracked nested repository by its worktree content under `kind: "nested-repo"`, excluding that repository's own history.
+It records a tracked submodule with uncommitted worktree changes by content under `dirty_submodule_manifest_sha256`, since the ordinary diff only shows a generic dirty marker for it.
 A binding failure is a stop condition, not a value to reconstruct by hand.
 Verify the plan artifact identity separately from the source-state identity.
 Do not treat a hash written inside the plan as independent proof of that plan's identity.
