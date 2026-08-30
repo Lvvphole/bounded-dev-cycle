@@ -34,6 +34,25 @@ REQUIRED_OUTPUT_FIELDS = frozenset(
         "evidence_sha256",
     }
 )
+REGRESSION_SET_CLAUSES = (
+    "Freeze the regression set before the first repair mutation as the union of the targeted failing oracle",
+    "Do not substitute unrelated repository-wide checks for this set or broaden it without new evidence.",
+)
+EVIDENCE_CHAIN_CLAUSES = (
+    "Attempt 1 must set `previous_evidence_sha256` to `null`.",
+    "Attempt 2 or later must supply the immediately preceding canonical evidence record",
+    "Never accept a caller-supplied hash alone as chain evidence.",
+)
+PASS_CLAUSE = (
+    "`BUGFIX-PASS`: PASS only if the targeted oracle fails on `PRE_REPAIR_SHA256`, "
+    "the same oracle passes on `POST_REPAIR_SHA256`, "
+    "`PRE_REPAIR_SHA256 != POST_REPAIR_SHA256`, "
+    "every member of the frozen regression set passes on the final candidate, "
+    "all repository-required checks pass, "
+    "complete tracked-plus-untracked scope validation passes, "
+    "no valid verifier was weakened or skipped, "
+    "and the SHA-256 evidence chain validates."
+)
 
 
 def canonical_json(value: object) -> bytes:
@@ -251,9 +270,15 @@ def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
             "id": "documented-attempt",
             "pass": "--attempt <n>" in testing,
         },
-        {"id": "regression-set-defined", "pass": "BUGFIX-REGRESSION-SET" in contract},
-        {"id": "complete-pass-criterion", "pass": "BUGFIX-PASS" in contract},
-        {"id": "sha256-evidence-chain", "pass": "BUGFIX-EVIDENCE-CHAIN" in contract},
+        {
+            "id": "regression-set-defined",
+            "pass": all(clause in contract for clause in REGRESSION_SET_CLAUSES),
+        },
+        {"id": "complete-pass-criterion", "pass": PASS_CLAUSE in contract},
+        {
+            "id": "sha256-evidence-chain",
+            "pass": all(clause in contract for clause in EVIDENCE_CHAIN_CLAUSES),
+        },
         {
             "id": "structured-evidence-output",
             "pass": REQUIRED_OUTPUT_FIELDS.issubset(schema_fields),
