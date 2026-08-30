@@ -11,7 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
-SCHEMA = "bounded-dev-cycle/bug-fix-governance-regression/v2"
+SCHEMA = "bounded-dev-cycle/bug-fix-governance-regression/v3"
 STATE_PATHS = (
     "CONTEXT.md",
     ".governance/testing.md",
@@ -23,6 +23,7 @@ REQUIRED_OUTPUT_FIELDS = frozenset(
     {
         "schema",
         "status",
+        "attempt",
         "pre_repair_sha256",
         "post_repair_sha256",
         "previous_evidence_sha256",
@@ -118,6 +119,111 @@ def state_sha256(raw: dict[str, bytes | None]) -> str:
     return sha256(canonical_json(manifest))
 
 
+def validate_previous_evidence(
+    record: object,
+    *,
+    current_pre_sha256: str,
+    current_attempt: int,
+) -> str:
+    if not isinstance(record, dict):
+        raise ValueError("previous evidence record must be a JSON object")
+
+    embedded = record.get("evidence_sha256")
+    if not isinstance(embedded, str) or not HEX64.fullmatch(embedded):
+        raise ValueError("previous evidence record has an invalid evidence_sha256")
+
+    unsigned = dict(record)
+    unsigned.pop("evidence_sha256")
+    if sha256(canonical_json(unsigned)) != embedded:
+        raise ValueError("previous evidence record SHA-256 does not recompute")
+
+    if record.get("schema") != SCHEMA:
+        raise ValueError("previous evidence record schema does not match")
+    if record.get("status") != "FAIL":
+        raise ValueError("a later repair attempt requires the preceding record to be FAIL")
+    if record.get("attempt") != current_attempt - 1:
+        raise ValueError("previous evidence record is not the immediately preceding attempt")
+    if record.get("pre_repair_sha256") != current_pre_sha256:
+        raise ValueError("previous evidence record does not bind the same pre-repair state")
+
+    return embedded
+
+
+def load_previous_evidence(
+    path: Path | None,
+    *,
+    current_pre_sha256: str,
+    current_attempt: int,
+) -> str | None:
+    if current_attempt < 1:
+        raise SystemExit("--attempt must be at least 1")
+    if current_attempt == 1:
+        if path is not None:
+            raise SystemExit("attempt 1 must not supply --previous-evidence-record")
+        return None
+    if path is None:
+        raise SystemExit("attempt 2 or later requires --previous-evidence-record")
+
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return validate_previous_evidence(
+            record,
+            current_pre_sha256=current_pre_sha256,
+            current_attempt=current_attempt,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise SystemExit(f"invalid previous evidence record: {exc}") from exc
+
+
+def previous_evidence_self_test(pre_sha256: str) -> bool:
+    unsigned = {
+        "schema": SCHEMA,
+        "status": "FAIL",
+        "attempt": 1,
+        "pre_repair_sha256": pre_sha256,
+        "post_repair_sha256": "1" * 64,
+        "previous_evidence_sha256": None,
+        "targeted_oracle": {
+            "sha256": "2" * 64,
+            "baseline_result": "FAIL",
+            "candidate_result": "FAIL",
+        },
+        "regression_set_results": [],
+        "repository_required_checks": [],
+        "scope_validation": {"status": "PASS"},
+    }
+    valid = {**unsigned, "evidence_sha256": sha256(canonical_json(unsigned))}
+    try:
+        accepted = validate_previous_evidence(
+            valid,
+            current_pre_sha256=pre_sha256,
+            current_attempt=2,
+        )
+    except ValueError:
+        return False
+    if accepted != valid["evidence_sha256"]:
+        return False
+
+    invalid_records = [
+        {**valid, "evidence_sha256": "0" * 64},
+        {**valid, "attempt": 0},
+        {**valid, "pre_repair_sha256": "3" * 64},
+        {**valid, "status": "PASS"},
+    ]
+    for record in invalid_records:
+        try:
+            validate_previous_evidence(
+                record,
+                current_pre_sha256=pre_sha256,
+                current_attempt=2,
+            )
+        except ValueError:
+            continue
+        return False
+
+    return True
+
+
 def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
     context_bytes = raw["CONTEXT.md"]
     testing_bytes = raw[".governance/testing.md"]
@@ -137,6 +243,14 @@ def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
             "id": "documented-pre-ref",
             "pass": "--pre-ref <faulty-baseline-ref>" in testing,
         },
+        {
+            "id": "documented-previous-record",
+            "pass": "--previous-evidence-record <path>" in testing,
+        },
+        {
+            "id": "documented-attempt",
+            "pass": "--attempt <n>" in testing,
+        },
         {"id": "regression-set-defined", "pass": "BUGFIX-REGRESSION-SET" in contract},
         {"id": "complete-pass-criterion", "pass": "BUGFIX-PASS" in contract},
         {"id": "sha256-evidence-chain", "pass": "BUGFIX-EVIDENCE-CHAIN" in contract},
@@ -151,7 +265,11 @@ def status_for(checks: list[dict[str, object]]) -> str:
     return "PASS" if all(item["pass"] is True for item in checks) else "FAIL"
 
 
-def repository_checks(root: Path, pre_ref: str) -> list[dict[str, object]]:
+def repository_checks(
+    root: Path,
+    pre_ref: str,
+    pre_sha256: str,
+) -> list[dict[str, object]]:
     checks: list[dict[str, object]] = []
 
     diff_check = git(root, "diff", "--check", pre_ref, "--", check=False)
@@ -166,6 +284,12 @@ def repository_checks(root: Path, pre_ref: str) -> list[dict[str, object]]:
         {
             "id": "readme-present",
             "status": "PASS" if (root / "README.md").is_file() else "FAIL",
+        }
+    )
+    checks.append(
+        {
+            "id": "previous-evidence-validation",
+            "status": "PASS" if previous_evidence_self_test(pre_sha256) else "FAIL",
         }
     )
 
@@ -232,18 +356,23 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default=".")
     parser.add_argument("--pre-ref", required=True)
-    parser.add_argument("--previous-evidence-sha256")
+    parser.add_argument("--attempt", type=int, required=True)
+    parser.add_argument("--previous-evidence-record", type=Path)
     args = parser.parse_args()
-
-    previous = args.previous_evidence_sha256
-    if previous is not None and not HEX64.fullmatch(previous):
-        raise SystemExit("previous evidence SHA-256 must be 64 lowercase hex characters")
 
     root = Path(args.repo).resolve()
     git(root, "rev-parse", "--verify", f"{args.pre_ref}^{{commit}}")
 
     pre = state_files(root, args.pre_ref)
     post = state_files(root, None)
+    pre_hash = state_sha256(pre)
+    post_hash = state_sha256(post)
+    previous = load_previous_evidence(
+        args.previous_evidence_record,
+        current_pre_sha256=pre_hash,
+        current_attempt=args.attempt,
+    )
+
     baseline_checks = evaluate_state(pre)
     candidate_checks = evaluate_state(post)
     baseline_result = status_for(baseline_checks)
@@ -257,10 +386,8 @@ def main() -> int:
         }
         for baseline, candidate in zip(baseline_checks, candidate_checks, strict=True)
     ]
-    required_checks = repository_checks(root, args.pre_ref)
+    required_checks = repository_checks(root, args.pre_ref, pre_hash)
     scope_validation = scope_result(root, args.pre_ref)
-    pre_hash = state_sha256(pre)
-    post_hash = state_sha256(post)
     oracle_hash = sha256(Path(__file__).read_bytes())
 
     status = (
@@ -277,6 +404,7 @@ def main() -> int:
     evidence = {
         "schema": SCHEMA,
         "status": status,
+        "attempt": args.attempt,
         "pre_repair_sha256": pre_hash,
         "post_repair_sha256": post_hash,
         "previous_evidence_sha256": previous,
