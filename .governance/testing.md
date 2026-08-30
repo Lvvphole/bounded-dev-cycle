@@ -7,7 +7,7 @@ Run from the repository root as applicable:
 - `python -m json.tool .codex-plugin/plugin.json`
 - `python -m json.tool .agents/plugins/marketplace.json`
 - `python -c "from pathlib import Path; assert all(Path(p).is_file() for p in ['skills/scout-agent/SKILL.md','skills/plan/SKILL.md','skills/build-agent/SKILL.md'])"`
-- For changes to the `bug-fix` route or its verification contract, run `python .governance/tests/test-bug-fix-contract.py --repo .`; when proving a repair transition, pass the prior run's `evidence_sha256` with `--previous-evidence-sha256 <sha256>`.
+- For changes to the `bug-fix` route or its verification contract, run `python .governance/tests/test-bug-fix-contract.py --repo . --pre-ref <faulty-baseline-ref>`; when proving a repair transition, pass the prior run's `evidence_sha256` with `--previous-evidence-sha256 <sha256>`.
 
 For scoped mutation tasks, capture the immutable pre-task commit as `BASE_SHA` before the first mutation, then run:
 - `git diff --check "$BASE_SHA" --`
