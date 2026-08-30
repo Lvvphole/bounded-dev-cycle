@@ -103,6 +103,7 @@ def main() -> int:
     evidence = {
         "checks": checks,
         "inputs": inputs,
+        "oracle_sha256": sha256(Path(__file__).read_bytes()),
         "previous_evidence_sha256": previous,
         "schema": SCHEMA,
         "state_sha256": state_sha256,
