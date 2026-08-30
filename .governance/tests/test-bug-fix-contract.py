@@ -144,6 +144,76 @@ def state_sha256(raw: dict[str, bytes | None]) -> str:
     return sha256(canonical_json(manifest))
 
 
+def validate_canonical_evidence_record(record: dict[str, object]) -> None:
+    if set(record) != REQUIRED_OUTPUT_FIELDS:
+        raise ValueError("previous evidence record fields do not match the canonical schema")
+
+    attempt = record["attempt"]
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("previous evidence record has an invalid attempt")
+
+    for field in ("pre_repair_sha256", "post_repair_sha256", "evidence_sha256"):
+        value = record[field]
+        if not isinstance(value, str) or not HEX64.fullmatch(value):
+            raise ValueError(f"previous evidence record has an invalid {field}")
+
+    previous = record["previous_evidence_sha256"]
+    if attempt == 1:
+        if previous is not None:
+            raise ValueError("attempt 1 predecessor evidence must not link to an earlier record")
+    elif not isinstance(previous, str) or not HEX64.fullmatch(previous):
+        raise ValueError("later predecessor evidence must contain a valid previous_evidence_sha256")
+
+    targeted = record["targeted_oracle"]
+    if not isinstance(targeted, dict) or set(targeted) != {
+        "sha256",
+        "baseline_result",
+        "candidate_result",
+    }:
+        raise ValueError("previous evidence record has an invalid targeted_oracle")
+    if not isinstance(targeted["sha256"], str) or not HEX64.fullmatch(targeted["sha256"]):
+        raise ValueError("previous evidence record has an invalid targeted oracle SHA-256")
+    if targeted["baseline_result"] not in {"FAIL", "PASS"} or targeted[
+        "candidate_result"
+    ] not in {"FAIL", "PASS"}:
+        raise ValueError("previous evidence record has invalid targeted oracle results")
+
+    regression = record["regression_set_results"]
+    if not isinstance(regression, list) or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("id"), str)
+        or not item["id"]
+        or item.get("baseline") not in {"FAIL", "PASS"}
+        or item.get("candidate") not in {"FAIL", "PASS"}
+        for item in regression
+    ):
+        raise ValueError("previous evidence record has invalid regression-set results")
+
+    required_checks = record["repository_required_checks"]
+    if not isinstance(required_checks, list) or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("id"), str)
+        or not item["id"]
+        or item.get("status") not in {"FAIL", "PASS", "NOT_APPLICABLE"}
+        for item in required_checks
+    ):
+        raise ValueError("previous evidence record has invalid repository-required checks")
+
+    scope = record["scope_validation"]
+    scope_lists = ("authorized_paths", "changed_paths", "unauthorized_paths")
+    if (
+        not isinstance(scope, dict)
+        or not all(key in scope for key in (*scope_lists, "status"))
+        or scope.get("status") not in {"FAIL", "PASS"}
+        or any(
+            not isinstance(scope[key], list)
+            or any(not isinstance(path, str) for path in scope[key])
+            for key in scope_lists
+        )
+    ):
+        raise ValueError("previous evidence record has invalid scope validation")
+
+
 def validate_previous_evidence(
     record: object,
     *,
@@ -153,22 +223,21 @@ def validate_previous_evidence(
     if not isinstance(record, dict):
         raise ValueError("previous evidence record must be a JSON object")
 
-    embedded = record.get("evidence_sha256")
-    if not isinstance(embedded, str) or not HEX64.fullmatch(embedded):
-        raise ValueError("previous evidence record has an invalid evidence_sha256")
+    validate_canonical_evidence_record(record)
+    embedded = record["evidence_sha256"]
 
     unsigned = dict(record)
     unsigned.pop("evidence_sha256")
     if sha256(canonical_json(unsigned)) != embedded:
         raise ValueError("previous evidence record SHA-256 does not recompute")
 
-    if record.get("schema") != SCHEMA:
+    if record["schema"] != SCHEMA:
         raise ValueError("previous evidence record schema does not match")
-    if record.get("status") != "FAIL":
+    if record["status"] != "FAIL":
         raise ValueError("a later repair attempt requires the preceding record to be FAIL")
-    if record.get("attempt") != current_attempt - 1:
+    if record["attempt"] != current_attempt - 1:
         raise ValueError("previous evidence record is not the immediately preceding attempt")
-    if record.get("pre_repair_sha256") != current_pre_sha256:
+    if record["pre_repair_sha256"] != current_pre_sha256:
         raise ValueError("previous evidence record does not bind the same pre-repair state")
 
     return embedded
@@ -200,8 +269,12 @@ def load_previous_evidence(
         raise SystemExit(f"invalid previous evidence record: {exc}") from exc
 
 
-def previous_evidence_self_test(pre_sha256: str) -> bool:
-    unsigned = {
+def signed_evidence(unsigned: dict[str, object]) -> dict[str, object]:
+    return {**unsigned, "evidence_sha256": sha256(canonical_json(unsigned))}
+
+
+def synthetic_previous_evidence(pre_sha256: str) -> dict[str, object]:
+    return {
         "schema": SCHEMA,
         "status": "FAIL",
         "attempt": 1,
@@ -213,40 +286,91 @@ def previous_evidence_self_test(pre_sha256: str) -> bool:
             "baseline_result": "FAIL",
             "candidate_result": "FAIL",
         },
-        "regression_set_results": [],
-        "repository_required_checks": [],
-        "scope_validation": {"status": "PASS"},
+        "regression_set_results": [
+            {"id": "synthetic", "baseline": "FAIL", "candidate": "FAIL"}
+        ],
+        "repository_required_checks": [{"id": "synthetic", "status": "PASS"}],
+        "scope_validation": {
+            "authorized_paths": sorted(AUTHORIZED_PATHS),
+            "changed_paths": [],
+            "unauthorized_paths": [],
+            "status": "PASS",
+        },
     }
-    valid = {**unsigned, "evidence_sha256": sha256(canonical_json(unsigned))}
+
+
+def negative_previous_evidence_records(
+    unsigned: dict[str, object], valid: dict[str, object]
+) -> list[dict[str, object]]:
+    incomplete = {
+        key: unsigned[key]
+        for key in ("schema", "status", "attempt", "pre_repair_sha256")
+    }
+    malformed_target = {**unsigned, "targeted_oracle": {"sha256": "2" * 64}}
+    malformed_regression = {**unsigned, "regression_set_results": [{}]}
+    malformed_checks = {**unsigned, "repository_required_checks": [{}]}
+    malformed_scope = {**unsigned, "scope_validation": {"status": "PASS"}}
+    wrong_attempt = {**unsigned, "attempt": 2}
+    wrong_pre = {**unsigned, "pre_repair_sha256": "3" * 64}
+    wrong_status = {**unsigned, "status": "PASS"}
+    return [
+        {**valid, "evidence_sha256": "0" * 64},
+        signed_evidence(incomplete),
+        signed_evidence(malformed_target),
+        signed_evidence(malformed_regression),
+        signed_evidence(malformed_checks),
+        signed_evidence(malformed_scope),
+        signed_evidence(wrong_attempt),
+        signed_evidence(wrong_pre),
+        signed_evidence(wrong_status),
+    ]
+
+
+def previous_evidence_behavior(script: bytes | None) -> bool:
+    if script is None:
+        return False
+    namespace: dict[str, object] = {
+        "__name__": "_bugfix_state",
+        "__file__": "<bugfix-state>",
+    }
     try:
-        accepted = validate_previous_evidence(
+        exec(compile(script.decode("utf-8"), "<bugfix-state>", "exec"), namespace)
+        validate = namespace["validate_previous_evidence"]
+    except (KeyError, SyntaxError, UnicodeDecodeError):
+        return False
+    if not callable(validate):
+        return False
+
+    pre_sha256 = "a" * 64
+    unsigned = synthetic_previous_evidence(pre_sha256)
+    valid = signed_evidence(unsigned)
+    try:
+        accepted = validate(
             valid,
             current_pre_sha256=pre_sha256,
             current_attempt=2,
         )
-    except ValueError:
+    except (TypeError, ValueError):
         return False
     if accepted != valid["evidence_sha256"]:
         return False
 
-    invalid_records = [
-        {**valid, "evidence_sha256": "0" * 64},
-        {**valid, "attempt": 0},
-        {**valid, "pre_repair_sha256": "3" * 64},
-        {**valid, "status": "PASS"},
-    ]
-    for record in invalid_records:
+    for record in negative_previous_evidence_records(unsigned, valid):
         try:
-            validate_previous_evidence(
+            validate(
                 record,
                 current_pre_sha256=pre_sha256,
                 current_attempt=2,
             )
-        except ValueError:
+        except (TypeError, ValueError):
             continue
         return False
-
     return True
+
+
+def previous_evidence_self_test(pre_sha256: str) -> bool:
+    del pre_sha256
+    return previous_evidence_behavior(Path(__file__).read_bytes())
 
 
 def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
@@ -288,6 +412,10 @@ def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
         {
             "id": "structured-evidence-output",
             "pass": REQUIRED_OUTPUT_FIELDS.issubset(schema_fields),
+        },
+        {
+            "id": "previous-evidence-behavior",
+            "pass": previous_evidence_behavior(script_bytes),
         },
     ]
 
