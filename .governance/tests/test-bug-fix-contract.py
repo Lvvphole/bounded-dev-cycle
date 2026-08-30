@@ -178,6 +178,7 @@ def run_frozen_oracle_process(
 ) -> subprocess.CompletedProcess[bytes]:
     command = [
         "python3",
+        "-I",
         str(process),
         "--repo",
         str(root),
