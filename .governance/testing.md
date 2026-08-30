@@ -7,6 +7,7 @@ Run from the repository root as applicable:
 - `python -m json.tool .codex-plugin/plugin.json`
 - `python -m json.tool .agents/plugins/marketplace.json`
 - `python -c "from pathlib import Path; assert all(Path(p).is_file() for p in ['skills/scout-agent/SKILL.md','skills/plan/SKILL.md','skills/build-agent/SKILL.md'])"`
+- For changes to the `bug-fix` route or its verification contract, run `python .governance/tests/test-bug-fix-contract.py --repo .`; when proving a repair transition, pass the prior run's `evidence_sha256` with `--previous-evidence-sha256 <sha256>`.
 
 For scoped mutation tasks, capture the immutable pre-task commit as `BASE_SHA` before the first mutation, then run:
 - `git diff --check "$BASE_SHA" --`
@@ -18,6 +19,7 @@ Do not use a restricting pathspec while discovering changed paths; validate scop
 
 ## Coverage requirements
 - No numeric code-coverage threshold exists because the repository currently defines no application test suite.
+- The absence of a repository-wide application suite does not waive the targeted oracle or affected regression set required for a `bug-fix` task.
 - Cover every changed governance or packaging contract with a direct structural or behavioral check appropriate to that change.
 - Do not substitute file existence for workflow-behavior verification.
 
@@ -35,6 +37,15 @@ Do not use a restricting pathspec while discovering changed paths; validate scop
 - PASS only if changed manifests parse, referenced paths exist when required, and the documented approval boundary is preserved.
 ### skill-bundle-update
 - PASS only if provenance is explicit, the pre-task base is immutable, the complete tracked-plus-untracked task path set contains only the authorized bundle, required files remain present, and no root or neighboring-bundle drift occurred.
+### bug-fix
+- Before the first repair mutation, freeze the targeted failing oracle and the complete authorized repair path set.
+- `BUGFIX-REGRESSION-SET`: Freeze the regression set before the first repair mutation as the union of the targeted failing oracle, every existing verifier named by repository governance, the task, or the approved plan for each changed path or contract, and every existing test that directly imports, calls, or exercises the changed public interface. Do not substitute unrelated repository-wide checks for this set or broaden it without new evidence.
+- Reuse an existing test when it directly expresses the defect. If no existing test can express the targeted failure, a new regression test file is permitted only when the task or approved plan explicitly authorizes that exact path and purpose; otherwise report `BLOCKED`.
+- Compute `PRE_REPAIR_SHA256` before the first repair mutation and `POST_REPAIR_SHA256` on the final candidate from the same frozen path set. For each path, hash raw file bytes; represent a missing path as `null`; sort repository-relative paths bytewise; SHA-256 the canonical JSON object of `path -> content_sha256_or_null` using sorted keys and separators `(',', ':')`.
+- `BUGFIX-EVIDENCE-CHAIN`: Emit a canonical JSON evidence record containing `schema`, `status`, `pre_repair_sha256`, `post_repair_sha256`, `previous_evidence_sha256`, targeted-oracle identity and baseline/candidate results, the frozen regression-set results, repository-required checks, complete scope-validation result, and `evidence_sha256`. Compute `evidence_sha256` as SHA-256 of that record with `evidence_sha256` omitted, sorted keys, and separators `(',', ':')`. Each repair attempt after the first must set `previous_evidence_sha256` to the immediately preceding evidence record's hash.
+- A changed SHA-256 is identity evidence only; it is not repair evidence unless the same targeted oracle changes from FAIL on the bound faulty state to PASS on the bound candidate and the frozen regression set passes.
+- `BUGFIX-PASS`: PASS only if the targeted oracle fails on `PRE_REPAIR_SHA256`, the same oracle passes on `POST_REPAIR_SHA256`, `PRE_REPAIR_SHA256 != POST_REPAIR_SHA256`, every member of the frozen regression set passes on the final candidate, all repository-required checks pass, complete tracked-plus-untracked scope validation passes, no valid verifier was weakened or skipped, and the SHA-256 evidence chain validates.
+- Report `BLOCKED` when a meaningful targeted oracle, required regression member, required hash, or required verification cannot be established without exceeding authority or weakening a valid contract.
 ### governance-change
 - PASS only if cross-references resolve, `AGENTS.md` is ≤100 lines, `CLAUDE.md` is ≤30 lines, and rules do not contradict the README workflow boundary.
 ### documentation
@@ -51,4 +62,4 @@ Do not use a restricting pathspec while discovering changed paths; validate scop
 ## Assumptions
 - Shell commands use a Git-capable command environment.
 - Python 3 is available for portable path and JSON validation.
-- No CI workflow or automated application test suite is currently defined.
+- No repository-wide application test suite is currently defined; `bug-fix` verification is selected per the contract above.
