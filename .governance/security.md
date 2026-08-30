@@ -26,12 +26,13 @@
 - Do not add a runtime, library, action, skill, or tool dependency without explicit task scope.
 - Record provenance for supplied or replaced skill bundles.
 - Pin dependency versions or immutable identities when the packaging format supports it.
-- Treat the external `engineering-rules` dependency as externally resolvable; do not vendor a substitute to bypass Build requirements.
+- Treat `skills/engineering-rules` as the approved bundled dependency when present. Replace it only from an explicitly approved source with recorded immutable identities.
+- Do not simulate or weaken `engineering-rules` to bypass Build requirements.
 - Review dependency additions for known security and supply-chain risk before acceptance.
 
 ## Sandbox boundaries
 - Restrict changes to paths authorized by the current plan or task.
-- Treat `skills/<name>/` as isolated supplied bundles; do not edit adjacent bundles opportunistically.
+- Treat `skills/<name>/` as isolated supplied or approved bundles; do not edit adjacent bundles opportunistically.
 - Keep plugin metadata changes under `.codex-plugin/` and `.agents/plugins/`.
 - Keep governance changes under root governance files and `.governance/`.
 - Stop when an operation requires authority outside the declared scope.
@@ -45,4 +46,4 @@
 ## Assumptions
 - No production service, database, or hosted runtime is part of the current repository.
 - GitHub is the primary state-changing repository surface.
-- The supplied skill contracts and human approval boundary are security-sensitive assets.
+- The supplied skill contracts, accepted `engineering-rules` bundle, and human approval boundary are security-sensitive assets.

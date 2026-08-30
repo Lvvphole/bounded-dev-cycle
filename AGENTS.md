@@ -1,7 +1,7 @@
 # Bounded Dev Cycle Agent Instructions
 
 ## Overview
-- Maintain a skill-only OpenAI plugin that packages `scout-agent`, `plan`, and `build-agent` into one bounded repository workflow.
+- Maintain a skill-only OpenAI plugin that packages `scout-agent`, `plan`, `build-agent`, and the accepted `engineering-rules` dependency into one bounded repository workflow.
 
 ## Setup
 - Read `README.md` before changing repository packaging or workflow behavior.
@@ -10,13 +10,14 @@
 - Do not assume an application runtime, package manager, MCP server, or deployment service exists.
 - Treat `.codex-plugin/plugin.json` and `.agents/plugins/marketplace.json` as plugin packaging metadata when present.
 - Treat `skills/scout-agent`, `skills/plan`, and `skills/build-agent` as supplied skill bundles, not ordinary source packages.
+- Treat `skills/engineering-rules` as the accepted engineering dependency bundle. Preserve its approved bytes and provenance.
 
 ## Testing
 - Run `git diff --check`.
 - Run `python -m json.tool .codex-plugin/plugin.json` when that file exists or changes.
 - Run `python -m json.tool .agents/plugins/marketplace.json` when that file exists or changes.
 - Run `python -c "from pathlib import Path; assert Path('README.md').is_file()"`.
-- Run `python -c "from pathlib import Path; assert all(Path(p).is_file() for p in ['skills/scout-agent/SKILL.md','skills/plan/SKILL.md','skills/build-agent/SKILL.md'])"` once the declared skill tree exists.
+- Run `python -c "from pathlib import Path; assert all(Path(p).is_file() for p in ['skills/scout-agent/SKILL.md','skills/plan/SKILL.md','skills/build-agent/SKILL.md','skills/engineering-rules/SKILL.md','skills/engineering-rules/scripts/check.py'])"` once the declared skill tree exists.
 - Follow `.governance/testing.md`; do not declare success from proxy checks when a behavioral contract applies.
 
 ## Code style
@@ -42,13 +43,14 @@
 - Do not grant a skill more repository authority than its contract allows.
 - Keep `scout-agent` read-only.
 - Do not start `build-agent` without human approval of the exact `PLAN_READY` identity.
-- Do not vendor, simulate, or weaken the external `engineering-rules` dependency to bypass a blocked gate.
+- Do not replace, simulate, or weaken `skills/engineering-rules`; update it only from an explicitly approved source with recorded immutable identities.
 - Follow `.governance/security.md`.
 
 ## Architecture
 - Keep root governance in `CLAUDE.md`, `AGENTS.md`, `CONTEXT.md`, and `.governance/`.
 - Keep plugin metadata under `.codex-plugin/` and `.agents/plugins/`.
 - Keep supplied skill bundles under `skills/scout-agent/`, `skills/plan/`, and `skills/build-agent/`.
+- Keep the accepted engineering dependency under `skills/engineering-rules/`.
 - Do not add nested `AGENTS.md` files inside supplied skill bundles.
 - Preserve the workflow: Scout read-only → Plan once → exact plan approval → Build once → stop on blocked or failed gate.
 - Keep package-layer changes separate from supplied skill-contract changes.
@@ -59,5 +61,6 @@
 
 ## Assumptions
 - The repository remains a skill-only plugin package with no application runtime or package-manager workflow.
-- The skill tree and plugin metadata described by `README.md` may be added after this governance proposal is approved.
+- The workflow skill tree and plugin metadata described by `README.md` may be added after this governance proposal is approved.
+- The accepted `engineering-rules` bundle is an integrity-sensitive repository dependency.
 - Human approval remains mandatory before Build execution and PR merge.
