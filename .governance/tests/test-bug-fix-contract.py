@@ -133,6 +133,10 @@ def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
         {"id": "removal-first", "pass": "BUGFIX-REMOVE-FIRST" in route},
         {"id": "no-invented-files", "pass": "BUGFIX-NO-INVENTED-FILES" in route},
         {"id": "verification-contract-present", "pass": bool(contract)},
+        {
+            "id": "documented-pre-ref",
+            "pass": "--pre-ref <faulty-baseline-ref>" in testing,
+        },
         {"id": "regression-set-defined", "pass": "BUGFIX-REGRESSION-SET" in contract},
         {"id": "complete-pass-criterion", "pass": "BUGFIX-PASS" in contract},
         {"id": "sha256-evidence-chain", "pass": "BUGFIX-EVIDENCE-CHAIN" in contract},
