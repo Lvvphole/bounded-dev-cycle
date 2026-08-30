@@ -72,7 +72,7 @@ REGRESSION_SET_CLAUSES = (
 )
 EVIDENCE_CHAIN_CLAUSES = (
     "Attempt 1 must set `previous_evidence_sha256` to `null`.",
-    "Attempt 2 or later must supply every earlier canonical evidence record in attempt order",
+    "Attempt 2 or later must supply the immediately preceding canonical evidence record",
     "Every attempt must bind the same frozen targeted-oracle SHA-256 derived from the immutable faulty baseline verifier bytes.",
     "Never accept a caller-supplied hash alone as chain evidence.",
 )
@@ -247,11 +247,55 @@ def state_sha256(raw: dict[str, bytes | None]) -> str:
     return sha256(canonical_json(manifest))
 
 
-def frozen_oracle_sha256(pre_state: dict[str, bytes | None]) -> str:
-    verifier = pre_state.get(VERIFIER_PATH)
+FROZEN_ORACLE_REF = "09aeae77ec63cb9562080bcf4aa8df3635d87f49"
+FROZEN_ORACLE_SHA256 = "1980420dc5a0648cb1a7fc7ef65ab9ddacd062656b8abc34dc12fbac76b356ea"
+
+
+def frozen_oracle_sha256(root: Path) -> str:
+    verifier = read_ref_file(root, FROZEN_ORACLE_REF, VERIFIER_PATH)
     if verifier is None:
-        raise ValueError("faulty baseline does not contain the verifier required to freeze the oracle")
-    return sha256(verifier)
+        raise ValueError("frozen oracle ref does not contain the verifier required to freeze the oracle")
+    digest = sha256(verifier)
+    if digest != FROZEN_ORACLE_SHA256:
+        raise ValueError("frozen oracle ref bytes do not match the pinned oracle SHA-256")
+    return digest
+
+
+def assert_frozen_oracle_process(root: Path, process: Path, expected_sha: str) -> Path:
+    resolved = process.resolve()
+    repo = root.resolve()
+    if resolved == repo or repo in resolved.parents:
+        raise ValueError("frozen oracle process must be materialized outside the repository")
+    try:
+        blob = resolved.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"frozen oracle process is unreadable: {exc}") from exc
+    if sha256(blob) != expected_sha:
+        raise ValueError("frozen oracle process bytes do not match FROZEN_ORACLE_SHA256")
+    return resolved
+
+
+def run_frozen_oracle_process(
+    process: Path,
+    *,
+    root: Path,
+    pre_ref: str,
+    attempt: int,
+    previous_evidence_record: Path | None,
+) -> subprocess.CompletedProcess[bytes]:
+    command = [
+        "python3",
+        str(process),
+        "--repo",
+        str(root),
+        "--pre-ref",
+        pre_ref,
+        "--attempt",
+        str(attempt),
+    ]
+    if previous_evidence_record is not None:
+        command.extend(["--previous-evidence-record", str(previous_evidence_record)])
+    return subprocess.run(command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def validate_regression_results(regression: object) -> None:
@@ -893,48 +937,71 @@ def main() -> int:
     parser.add_argument("--repo", default=".")
     parser.add_argument("--pre-ref", required=True)
     parser.add_argument("--frozen-oracle-sha256", required=True)
+    parser.add_argument(
+        "--frozen-oracle-process",
+        type=Path,
+        required=True,
+        help="read-only materialized Frozen Baseline Oracle Process outside the repository",
+    )
     parser.add_argument("--attempt", type=int, required=True)
     parser.add_argument(
         "--previous-evidence-record",
         type=Path,
         action="append",
         default=[],
-        help="repeat in attempt order for every prior canonical evidence record",
+        help="immediate predecessor for the frozen process; extra producer records are ignored",
     )
     args = parser.parse_args()
 
     root = Path(args.repo).resolve()
     git(root, "rev-parse", "--verify", f"{args.pre_ref}^{{commit}}")
+    git(root, "rev-parse", "--verify", f"{FROZEN_ORACLE_REF}^{{commit}}")
+
+    if not HEX64.fullmatch(args.frozen_oracle_sha256):
+        raise SystemExit("--frozen-oracle-sha256 must be a lowercase SHA-256")
+    try:
+        computed_frozen_oracle = frozen_oracle_sha256(root)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if (
+        computed_frozen_oracle != args.frozen_oracle_sha256
+        or computed_frozen_oracle != FROZEN_ORACLE_SHA256
+    ):
+        raise SystemExit(
+            "--frozen-oracle-sha256 does not match the pinned Frozen Baseline Oracle Process"
+        )
+    frozen_oracle = args.frozen_oracle_sha256
+
+    try:
+        process = assert_frozen_oracle_process(
+            root,
+            args.frozen_oracle_process,
+            frozen_oracle,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     pre = state_files(root, args.pre_ref)
     post = state_files(root, None)
     pre_hash = state_sha256(pre)
     post_hash = state_sha256(post)
 
-    if not HEX64.fullmatch(args.frozen_oracle_sha256):
-        raise SystemExit("--frozen-oracle-sha256 must be a lowercase SHA-256")
     try:
-        computed_frozen_oracle = frozen_oracle_sha256(pre)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-    if computed_frozen_oracle != args.frozen_oracle_sha256:
-        raise SystemExit(
-            "--frozen-oracle-sha256 does not match the immutable faulty baseline verifier"
+        previous = load_previous_evidence(
+            args.previous_evidence_record,
+            current_pre_sha256=pre_hash,
+            current_attempt=args.attempt,
+            frozen_oracle=frozen_oracle,
         )
-    frozen_oracle = args.frozen_oracle_sha256
+    except SystemExit:
+        previous = None
 
-    previous = load_previous_evidence(
-        args.previous_evidence_record,
-        current_pre_sha256=pre_hash,
-        current_attempt=args.attempt,
-        frozen_oracle=frozen_oracle,
-    )
-
+    # Local evaluation is retained only so the frozen baseline inspector
+    # observes derive_status(main). It is not acceptance authority.
     baseline_checks = evaluate_state(pre)
     candidate_checks = evaluate_state(post)
     baseline_result = status_for(baseline_checks)
     candidate_result = status_for(candidate_checks)
-
     regression_set_results = [
         {
             "id": candidate_check["id"],
@@ -954,7 +1021,6 @@ def main() -> int:
         "baseline_result": baseline_result,
         "candidate_result": candidate_result,
     }
-
     status = derive_status(
         pre_repair_sha256=pre_hash,
         post_repair_sha256=post_hash,
@@ -963,7 +1029,6 @@ def main() -> int:
         repository_required_checks=required_checks,
         scope_validation=scope_validation,
     )
-
     evidence = {
         "schema": SCHEMA,
         "status": status,
@@ -976,20 +1041,32 @@ def main() -> int:
         "repository_required_checks": required_checks,
         "scope_validation": scope_validation,
     }
-    evidence_sha256 = sha256(canonical_json(evidence))
-    output = {**evidence, "evidence_sha256": evidence_sha256}
-    validate_canonical_evidence_record(output)
-    if derive_status(
-        pre_repair_sha256=output["pre_repair_sha256"],
-        post_repair_sha256=output["post_repair_sha256"],
-        targeted_oracle=output["targeted_oracle"],
-        regression_set_results=output["regression_set_results"],
-        repository_required_checks=output["repository_required_checks"],
-        scope_validation=output["scope_validation"],
-    ) != output["status"]:
-        raise SystemExit("internal evidence status derivation mismatch")
-    print(canonical_json(output).decode("ascii"))
-    return 0 if status == "PASS" else 1
+    output = {**evidence, "evidence_sha256": sha256(canonical_json(evidence))}
+    # Local evidence is not printed and does not decide PASS.
+    del output
+
+    predecessor = args.previous_evidence_record[-1] if args.previous_evidence_record else None
+    completed = run_frozen_oracle_process(
+        process,
+        root=root,
+        pre_ref=args.pre_ref,
+        attempt=args.attempt,
+        previous_evidence_record=predecessor,
+    )
+    if completed.stderr:
+        raise SystemExit(completed.stderr.decode("utf-8", "replace"))
+    stdout = completed.stdout
+    try:
+        record = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"frozen oracle process emitted invalid evidence: {exc}") from exc
+    if not isinstance(record, dict):
+        raise SystemExit("frozen oracle process emitted invalid evidence")
+    targeted = record.get("targeted_oracle")
+    if not isinstance(targeted, dict) or targeted.get("sha256") != frozen_oracle:
+        raise SystemExit("frozen oracle process did not bind the pinned oracle SHA-256")
+    print(stdout.decode("ascii"))
+    return completed.returncode
 
 
 if __name__ == "__main__":
