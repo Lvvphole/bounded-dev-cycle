@@ -11,11 +11,12 @@ import re
 import subprocess
 from pathlib import Path
 
-SCHEMA = "bounded-dev-cycle/bug-fix-governance-regression/v4"
+SCHEMA = "bounded-dev-cycle/bug-fix-governance-regression/v5"
+VERIFIER_PATH = ".governance/tests/test-bug-fix-contract.py"
 STATE_PATHS = (
     "CONTEXT.md",
     ".governance/testing.md",
-    ".governance/tests/test-bug-fix-contract.py",
+    VERIFIER_PATH,
 )
 AUTHORIZED_PATHS = frozenset(STATE_PATHS)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -71,7 +72,8 @@ REGRESSION_SET_CLAUSES = (
 )
 EVIDENCE_CHAIN_CLAUSES = (
     "Attempt 1 must set `previous_evidence_sha256` to `null`.",
-    "Attempt 2 or later must supply the immediately preceding canonical evidence record",
+    "Attempt 2 or later must supply every earlier canonical evidence record in attempt order",
+    "Every attempt must bind the same frozen targeted-oracle SHA-256 derived from the immutable faulty baseline verifier bytes.",
     "Never accept a caller-supplied hash alone as chain evidence.",
 )
 PASS_CLAUSE = (
@@ -186,7 +188,6 @@ def previous_evidence_behavior(script: bytes | None) -> bool:
     tree = parse_python_source(script)
     if tree is None:
         return False
-
     if any(
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
@@ -197,14 +198,22 @@ def previous_evidence_behavior(script: bytes | None) -> bool:
 
     derive = function_node(tree, "derive_status")
     validate = function_node(tree, "validate_previous_evidence")
+    validate_chain = function_node(tree, "validate_evidence_chain")
+    frozen_oracle = function_node(tree, "frozen_oracle_sha256")
     output = function_node(tree, "output_fields")
     main = function_node(tree, "main")
-    if any(node is None for node in (derive, validate, output, main)):
+    if any(
+        node is None
+        for node in (derive, validate, validate_chain, frozen_oracle, output, main)
+    ):
         return False
 
     return (
         calls_name(validate, "derive_status")
+        and calls_name(validate_chain, "validate_previous_evidence")
         and calls_name(main, "derive_status")
+        and calls_name(main, "frozen_oracle_sha256")
+        and calls_name(main, "load_previous_evidence")
         and calls_name(output, "parse_python_source")
     )
 
@@ -236,6 +245,13 @@ def state_sha256(raw: dict[str, bytes | None]) -> str:
         for path, content in sorted(raw.items())
     }
     return sha256(canonical_json(manifest))
+
+
+def frozen_oracle_sha256(pre_state: dict[str, bytes | None]) -> str:
+    verifier = pre_state.get(VERIFIER_PATH)
+    if verifier is None:
+        raise ValueError("faulty baseline does not contain the verifier required to freeze the oracle")
+    return sha256(verifier)
 
 
 def validate_regression_results(regression: object) -> None:
@@ -356,7 +372,6 @@ def derive_status(
 def validate_canonical_evidence_record(record: dict[str, object]) -> None:
     if set(record) != REQUIRED_OUTPUT_FIELDS:
         raise ValueError("previous evidence record fields do not match the canonical schema")
-
     if record.get("schema") != SCHEMA:
         raise ValueError("previous evidence record schema does not match")
     if record.get("status") not in {"FAIL", "PASS"}:
@@ -400,19 +415,29 @@ def validate_canonical_evidence_record(record: dict[str, object]) -> None:
 def validate_previous_evidence(
     record: object,
     *,
+    expected_attempt: int,
     current_pre_sha256: str,
-    current_attempt: int,
+    frozen_oracle: str,
+    expected_previous_sha256: str | None,
 ) -> str:
     if not isinstance(record, dict):
         raise ValueError("previous evidence record must be a JSON object")
 
     validate_canonical_evidence_record(record)
     embedded = record["evidence_sha256"]
-
     unsigned = dict(record)
     unsigned.pop("evidence_sha256")
     if sha256(canonical_json(unsigned)) != embedded:
         raise ValueError("previous evidence record SHA-256 does not recompute")
+
+    if record["attempt"] != expected_attempt:
+        raise ValueError("previous evidence records are not the complete ordered attempt chain")
+    if record["pre_repair_sha256"] != current_pre_sha256:
+        raise ValueError("previous evidence record does not bind the same pre-repair state")
+    if record["targeted_oracle"]["sha256"] != frozen_oracle:
+        raise ValueError("previous evidence record does not bind the frozen targeted oracle")
+    if record["previous_evidence_sha256"] != expected_previous_sha256:
+        raise ValueError("previous evidence record does not link to the validated prior record")
 
     derived = derive_status(
         pre_repair_sha256=record["pre_repair_sha256"],
@@ -425,39 +450,53 @@ def validate_previous_evidence(
     if record["status"] != derived:
         raise ValueError("previous evidence record status is inconsistent with its evidence")
     if derived != "FAIL":
-        raise ValueError("a later repair attempt requires the preceding record to derive FAIL")
-    if record["attempt"] != current_attempt - 1:
-        raise ValueError("previous evidence record is not the immediately preceding attempt")
-    if record["pre_repair_sha256"] != current_pre_sha256:
-        raise ValueError("previous evidence record does not bind the same pre-repair state")
-
+        raise ValueError("every preceding repair attempt must derive FAIL")
     return embedded
 
 
+def validate_evidence_chain(
+    records: list[object],
+    *,
+    current_attempt: int,
+    current_pre_sha256: str,
+    frozen_oracle: str,
+) -> str | None:
+    if current_attempt < 1:
+        raise ValueError("attempt must be at least 1")
+    if len(records) != current_attempt - 1:
+        raise ValueError("attempt requires every prior evidence record exactly once")
+
+    previous_sha256: str | None = None
+    for expected_attempt, record in enumerate(records, start=1):
+        previous_sha256 = validate_previous_evidence(
+            record,
+            expected_attempt=expected_attempt,
+            current_pre_sha256=current_pre_sha256,
+            frozen_oracle=frozen_oracle,
+            expected_previous_sha256=previous_sha256,
+        )
+    return previous_sha256
+
+
 def load_previous_evidence(
-    path: Path | None,
+    paths: list[Path],
     *,
     current_pre_sha256: str,
     current_attempt: int,
+    frozen_oracle: str,
 ) -> str | None:
-    if current_attempt < 1:
-        raise SystemExit("--attempt must be at least 1")
-    if current_attempt == 1:
-        if path is not None:
-            raise SystemExit("attempt 1 must not supply --previous-evidence-record")
-        return None
-    if path is None:
-        raise SystemExit("attempt 2 or later requires --previous-evidence-record")
-
+    records: list[object] = []
     try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-        return validate_previous_evidence(
-            record,
-            current_pre_sha256=current_pre_sha256,
+        for path in paths:
+            records.append(json.loads(path.read_text(encoding="utf-8")))
+        return validate_evidence_chain(
+            records,
             current_attempt=current_attempt,
+            current_pre_sha256=current_pre_sha256,
+            frozen_oracle=frozen_oracle,
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-        raise SystemExit(f"invalid previous evidence record: {exc}") from exc
+        raise SystemExit(f"invalid previous evidence chain: {exc}") from exc
 
 
 def signed_evidence(unsigned: dict[str, object]) -> dict[str, object]:
@@ -486,22 +525,29 @@ def synthetic_required_checks() -> list[dict[str, object]]:
 def synthetic_scope() -> dict[str, object]:
     return {
         "authorized_paths": sorted(AUTHORIZED_PATHS),
-        "changed_paths": [".governance/tests/test-bug-fix-contract.py"],
+        "changed_paths": [VERIFIER_PATH],
         "unauthorized_paths": [],
         "status": "PASS",
     }
 
 
-def synthetic_previous_evidence(pre_sha256: str) -> dict[str, object]:
+def synthetic_fail_evidence(
+    pre_sha256: str,
+    frozen_oracle: str,
+    *,
+    attempt: int = 1,
+    previous_evidence_sha256: str | None = None,
+) -> dict[str, object]:
+    post_digit = "1" if attempt % 2 else "2"
     return {
         "schema": SCHEMA,
         "status": "FAIL",
-        "attempt": 1,
+        "attempt": attempt,
         "pre_repair_sha256": pre_sha256,
-        "post_repair_sha256": "1" * 64,
-        "previous_evidence_sha256": None,
+        "post_repair_sha256": post_digit * 64,
+        "previous_evidence_sha256": previous_evidence_sha256,
         "targeted_oracle": {
-            "sha256": "2" * 64,
+            "sha256": frozen_oracle,
             "baseline_result": "FAIL",
             "candidate_result": "FAIL",
         },
@@ -511,12 +557,12 @@ def synthetic_previous_evidence(pre_sha256: str) -> dict[str, object]:
     }
 
 
-def synthetic_pass_evidence(pre_sha256: str) -> dict[str, object]:
+def synthetic_pass_evidence(pre_sha256: str, frozen_oracle: str) -> dict[str, object]:
     return {
-        **synthetic_previous_evidence(pre_sha256),
+        **synthetic_fail_evidence(pre_sha256, frozen_oracle),
         "status": "PASS",
         "targeted_oracle": {
-            "sha256": "2" * 64,
+            "sha256": frozen_oracle,
             "baseline_result": "FAIL",
             "candidate_result": "PASS",
         },
@@ -527,47 +573,32 @@ def negative_previous_evidence_records(
     fail_unsigned: dict[str, object],
     valid_fail: dict[str, object],
     pass_unsigned: dict[str, object],
+    frozen_oracle: str,
 ) -> list[dict[str, object]]:
     incomplete = dict(fail_unsigned)
     incomplete.pop("targeted_oracle")
-
     extra = {**fail_unsigned, "unexpected": True}
     wrong_type = {**fail_unsigned, "attempt": "1"}
-    malformed_target = {**fail_unsigned, "targeted_oracle": {"sha256": "2" * 64}}
-    empty_regression = {**fail_unsigned, "regression_set_results": []}
-
-    malformed_regression = {
+    malformed_target = {**fail_unsigned, "targeted_oracle": {"sha256": frozen_oracle}}
+    wrong_oracle = {
         **fail_unsigned,
-        "regression_set_results": [{}],
+        "targeted_oracle": {**fail_unsigned["targeted_oracle"], "sha256": "f" * 64},
     }
+    empty_regression = {**fail_unsigned, "regression_set_results": []}
+    malformed_regression = {**fail_unsigned, "regression_set_results": [{}]}
     duplicate_regression = {
         **fail_unsigned,
         "regression_set_results": [
             *synthetic_regression_results()[:-1],
-            {
-                **synthetic_regression_results()[-1],
-                "id": REGRESSION_CHECK_IDS[-2],
-            },
+            {**synthetic_regression_results()[-1], "id": REGRESSION_CHECK_IDS[-2]},
         ],
     }
-    malformed_checks = {
-        **fail_unsigned,
-        "repository_required_checks": [{}],
-    }
-    malformed_scope = {
-        **fail_unsigned,
-        "scope_validation": {"status": "PASS"},
-    }
-
-    wrong_attempt = {
-        **fail_unsigned,
-        "attempt": 2,
-        "previous_evidence_sha256": "4" * 64,
-    }
+    malformed_checks = {**fail_unsigned, "repository_required_checks": [{}]}
+    malformed_scope = {**fail_unsigned, "scope_validation": {"status": "PASS"}}
+    wrong_attempt = {**fail_unsigned, "attempt": 2, "previous_evidence_sha256": "4" * 64}
     wrong_pre = {**fail_unsigned, "pre_repair_sha256": "3" * 64}
     fail_claims_pass = {**fail_unsigned, "status": "PASS"}
     pass_claims_fail = {**pass_unsigned, "status": "FAIL"}
-
     equal_hash_claims_pass = {
         **pass_unsigned,
         "post_repair_sha256": pass_unsigned["pre_repair_sha256"],
@@ -579,20 +610,15 @@ def negative_previous_evidence_records(
         **pass_unsigned,
         "regression_set_results": failing_regression,
     }
-
     failing_checks = synthetic_required_checks()
     failing_checks[1] = {"id": "readme-present", "status": "FAIL"}
     failing_check_claims_pass = {
         **pass_unsigned,
         "repository_required_checks": failing_checks,
     }
-
     unauthorized_scope = {
         "authorized_paths": sorted(AUTHORIZED_PATHS),
-        "changed_paths": [
-            ".governance/tests/test-bug-fix-contract.py",
-            "outside.txt",
-        ],
+        "changed_paths": [VERIFIER_PATH, "outside.txt"],
         "unauthorized_paths": ["outside.txt"],
         "status": "PASS",
     }
@@ -607,6 +633,7 @@ def negative_previous_evidence_records(
         signed_evidence(extra),
         signed_evidence(wrong_type),
         signed_evidence(malformed_target),
+        signed_evidence(wrong_oracle),
         signed_evidence(empty_regression),
         signed_evidence(malformed_regression),
         signed_evidence(duplicate_regression),
@@ -624,32 +651,72 @@ def negative_previous_evidence_records(
     ]
 
 
-def evidence_validation_self_test(pre_sha256: str) -> bool:
-    fail_unsigned = synthetic_previous_evidence(pre_sha256)
+def evidence_validation_self_test(pre_sha256: str, frozen_oracle: str) -> bool:
+    fail_unsigned = synthetic_fail_evidence(pre_sha256, frozen_oracle)
     valid_fail = signed_evidence(fail_unsigned)
-    pass_unsigned = synthetic_pass_evidence(pre_sha256)
+    pass_unsigned = synthetic_pass_evidence(pre_sha256, frozen_oracle)
 
     try:
-        accepted = validate_previous_evidence(
-            valid_fail,
-            current_pre_sha256=pre_sha256,
+        if validate_evidence_chain(
+            [valid_fail],
             current_attempt=2,
-        )
+            current_pre_sha256=pre_sha256,
+            frozen_oracle=frozen_oracle,
+        ) != valid_fail["evidence_sha256"]:
+            return False
     except (TypeError, ValueError):
-        return False
-    if accepted != valid_fail["evidence_sha256"]:
         return False
 
     for record in negative_previous_evidence_records(
         fail_unsigned,
         valid_fail,
         pass_unsigned,
+        frozen_oracle,
     ):
         try:
             validate_previous_evidence(
                 record,
+                expected_attempt=1,
                 current_pre_sha256=pre_sha256,
-                current_attempt=2,
+                frozen_oracle=frozen_oracle,
+                expected_previous_sha256=None,
+            )
+        except (TypeError, ValueError):
+            continue
+        return False
+
+    attempt_two_unsigned = synthetic_fail_evidence(
+        pre_sha256,
+        frozen_oracle,
+        attempt=2,
+        previous_evidence_sha256=valid_fail["evidence_sha256"],
+    )
+    attempt_two = signed_evidence(attempt_two_unsigned)
+    try:
+        if validate_evidence_chain(
+            [valid_fail, attempt_two],
+            current_attempt=3,
+            current_pre_sha256=pre_sha256,
+            frozen_oracle=frozen_oracle,
+        ) != attempt_two["evidence_sha256"]:
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    broken_link = signed_evidence(
+        {**attempt_two_unsigned, "previous_evidence_sha256": "4" * 64}
+    )
+    for broken_chain in (
+        [valid_fail, broken_link],
+        [attempt_two],
+        [attempt_two, valid_fail],
+    ):
+        try:
+            validate_evidence_chain(
+                broken_chain,
+                current_attempt=3,
+                current_pre_sha256=pre_sha256,
+                frozen_oracle=frozen_oracle,
             )
         except (TypeError, ValueError):
             continue
@@ -660,7 +727,7 @@ def evidence_validation_self_test(pre_sha256: str) -> bool:
 def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
     context_bytes = raw["CONTEXT.md"]
     testing_bytes = raw[".governance/testing.md"]
-    script_bytes = raw[".governance/tests/test-bug-fix-contract.py"]
+    script_bytes = raw[VERIFIER_PATH]
 
     context = normalized_text(context_bytes)
     testing = normalized_text(testing_bytes)
@@ -675,16 +742,14 @@ def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
         {"id": "verification-contract-present", "pass": bool(contract)},
         {
             "id": "documented-pre-ref",
-            "pass": "--pre-ref <faulty-baseline-ref>" in testing,
+            "pass": "--pre-ref <faulty-baseline-ref>" in testing
+            and "--frozen-oracle-sha256 <sha256>" in testing,
         },
         {
             "id": "documented-previous-record",
-            "pass": "--previous-evidence-record <path>" in testing,
+            "pass": "repeat `--previous-evidence-record <path>`" in testing,
         },
-        {
-            "id": "documented-attempt",
-            "pass": "--attempt <n>" in testing,
-        },
+        {"id": "documented-attempt", "pass": "--attempt <n>" in testing},
         {
             "id": "regression-set-defined",
             "pass": all(clause in contract for clause in REGRESSION_SET_CLAUSES),
@@ -710,19 +775,17 @@ def malformed_baseline_self_test() -> bool:
         raw = {
             "CONTEXT.md": b"",
             ".governance/testing.md": b"",
-            ".governance/tests/test-bug-fix-contract.py": malformed,
+            VERIFIER_PATH: malformed,
         }
         try:
             checks = evaluate_state(raw)
         except Exception:
             return False
-
         by_id = {item["id"]: item["pass"] for item in checks}
         if by_id.get("structured-evidence-output") is not False:
             return False
         if by_id.get("previous-evidence-behavior") is not False:
             return False
-
     return True
 
 
@@ -734,6 +797,7 @@ def repository_checks(
     root: Path,
     pre_ref: str,
     pre_sha256: str,
+    frozen_oracle: str,
 ) -> list[dict[str, object]]:
     checks: list[dict[str, object]] = []
 
@@ -754,7 +818,9 @@ def repository_checks(
     checks.append(
         {
             "id": "previous-evidence-validation",
-            "status": "PASS" if evidence_validation_self_test(pre_sha256) else "FAIL",
+            "status": "PASS"
+            if evidence_validation_self_test(pre_sha256, frozen_oracle)
+            else "FAIL",
         }
     )
     checks.append(
@@ -792,7 +858,6 @@ def repository_checks(
                 else "FAIL",
             }
         )
-
     return checks
 
 
@@ -827,8 +892,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", default=".")
     parser.add_argument("--pre-ref", required=True)
+    parser.add_argument("--frozen-oracle-sha256", required=True)
     parser.add_argument("--attempt", type=int, required=True)
-    parser.add_argument("--previous-evidence-record", type=Path)
+    parser.add_argument(
+        "--previous-evidence-record",
+        type=Path,
+        action="append",
+        default=[],
+        help="repeat in attempt order for every prior canonical evidence record",
+    )
     args = parser.parse_args()
 
     root = Path(args.repo).resolve()
@@ -838,10 +910,24 @@ def main() -> int:
     post = state_files(root, None)
     pre_hash = state_sha256(pre)
     post_hash = state_sha256(post)
+
+    if not HEX64.fullmatch(args.frozen_oracle_sha256):
+        raise SystemExit("--frozen-oracle-sha256 must be a lowercase SHA-256")
+    try:
+        computed_frozen_oracle = frozen_oracle_sha256(pre)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if computed_frozen_oracle != args.frozen_oracle_sha256:
+        raise SystemExit(
+            "--frozen-oracle-sha256 does not match the immutable faulty baseline verifier"
+        )
+    frozen_oracle = args.frozen_oracle_sha256
+
     previous = load_previous_evidence(
         args.previous_evidence_record,
         current_pre_sha256=pre_hash,
         current_attempt=args.attempt,
+        frozen_oracle=frozen_oracle,
     )
 
     baseline_checks = evaluate_state(pre)
@@ -861,10 +947,10 @@ def main() -> int:
             strict=True,
         )
     ]
-    required_checks = repository_checks(root, args.pre_ref, pre_hash)
+    required_checks = repository_checks(root, args.pre_ref, pre_hash, frozen_oracle)
     scope_validation = scope_result(root, args.pre_ref)
     targeted_oracle = {
-        "sha256": sha256(Path(__file__).read_bytes()),
+        "sha256": frozen_oracle,
         "baseline_result": baseline_result,
         "candidate_result": candidate_result,
     }
