@@ -179,7 +179,7 @@ def validate_canonical_evidence_record(record: dict[str, object]) -> None:
         raise ValueError("previous evidence record has invalid targeted oracle results")
 
     regression = record["regression_set_results"]
-    if not isinstance(regression, list) or any(
+    if not isinstance(regression, list) or not regression or any(
         not isinstance(item, dict)
         or not isinstance(item.get("id"), str)
         or not item["id"]
@@ -307,6 +307,7 @@ def negative_previous_evidence_records(
         for key in ("schema", "status", "attempt", "pre_repair_sha256")
     }
     malformed_target = {**unsigned, "targeted_oracle": {"sha256": "2" * 64}}
+    empty_regression = {**unsigned, "regression_set_results": []}
     malformed_regression = {**unsigned, "regression_set_results": [{}]}
     malformed_checks = {**unsigned, "repository_required_checks": [{}]}
     malformed_scope = {**unsigned, "scope_validation": {"status": "PASS"}}
@@ -317,6 +318,7 @@ def negative_previous_evidence_records(
         {**valid, "evidence_sha256": "0" * 64},
         signed_evidence(incomplete),
         signed_evidence(malformed_target),
+        signed_evidence(empty_regression),
         signed_evidence(malformed_regression),
         signed_evidence(malformed_checks),
         signed_evidence(malformed_scope),
@@ -329,23 +331,45 @@ def negative_previous_evidence_records(
 def previous_evidence_behavior(script: bytes | None) -> bool:
     if script is None:
         return False
-    namespace: dict[str, object] = {
-        "__name__": "_bugfix_state",
-        "__file__": "<bugfix-state>",
-    }
     try:
-        exec(compile(script.decode("utf-8"), "<bugfix-state>", "exec"), namespace)
-        validate = namespace["validate_previous_evidence"]
-    except (KeyError, SyntaxError, UnicodeDecodeError):
-        return False
-    if not callable(validate):
+        tree = ast.parse(script.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError):
         return False
 
-    pre_sha256 = "a" * 64
+    if any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"exec", "eval"}
+        for node in ast.walk(tree)
+    ):
+        return False
+
+    validator = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "validate_canonical_evidence_record"
+        ),
+        None,
+    )
+    if validator is None:
+        return False
+
+    return any(
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.Not)
+        and isinstance(node.operand, ast.Name)
+        and node.operand.id == "regression"
+        for node in ast.walk(validator)
+    )
+
+
+def previous_evidence_self_test(pre_sha256: str) -> bool:
     unsigned = synthetic_previous_evidence(pre_sha256)
     valid = signed_evidence(unsigned)
     try:
-        accepted = validate(
+        accepted = validate_previous_evidence(
             valid,
             current_pre_sha256=pre_sha256,
             current_attempt=2,
@@ -357,7 +381,7 @@ def previous_evidence_behavior(script: bytes | None) -> bool:
 
     for record in negative_previous_evidence_records(unsigned, valid):
         try:
-            validate(
+            validate_previous_evidence(
                 record,
                 current_pre_sha256=pre_sha256,
                 current_attempt=2,
@@ -366,11 +390,6 @@ def previous_evidence_behavior(script: bytes | None) -> bool:
             continue
         return False
     return True
-
-
-def previous_evidence_self_test(pre_sha256: str) -> bool:
-    del pre_sha256
-    return previous_evidence_behavior(Path(__file__).read_bytes())
 
 
 def evaluate_state(raw: dict[str, bytes | None]) -> list[dict[str, object]]:
